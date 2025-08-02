@@ -1,7 +1,8 @@
-import { RecursiveCharacterTextSplitter, TextSplitter } from '@langchain/textsplitters';
+import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
+import * as fs from 'fs';
 
 @Injectable()
 export class CaptionsAiService {
@@ -11,7 +12,7 @@ export class CaptionsAiService {
     this.llm = new OpenAI({
       apiKey: this.config.get<string>('OPENAI_API_KEY'),
       baseURL: 'https://api.openai.com/v1',
-      timeout: 10000, // 10 seconds
+      timeout: 10000 * 60, // 10 minutes
     });
 
     this.splitter = new RecursiveCharacterTextSplitter({
@@ -23,8 +24,12 @@ export class CaptionsAiService {
 
   async generateCaptions(text: string) {
     try {
+      //const result = await this.llm.chat.completions.create({
       const response = await this.llm.responses.create({
         model: 'gpt-4o-mini',
+        instructions:'Generate a caption and hashtags',
+        max_output_tokens: 100,
+        temperature: 0.7,
         input: [
           {
             role: 'developer',
@@ -49,10 +54,24 @@ export class CaptionsAiService {
     try {
         //console.log(typeof text);
       const chunks = await this.splitTextIntoChunks(text);
+      
       return chunks;
     } catch (error) {
       console.error('Error splitting text:', error);
     }
+
+  }
+
+  async transcribeAudio (audio: string) {
+    const transcript = await this.llm.audio.transcriptions.create({
+      file:  fs.createReadStream(audio),
+      model: 'whisper-1',
+      response_format: 'text',
+    })
+
+  
+
+    return transcript;
   }
 
   //-----------------------------------------------------------------------------
