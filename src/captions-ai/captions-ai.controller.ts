@@ -60,6 +60,12 @@ export class CaptionsAiController {
     return this.captionsAiService.splitText(filePath);
   }
 
+  @Get('summary')
+  async summary(@Body() dto:TextDto){
+    console.log(dto, dto.text)
+    return this.captionsAiService.summary(dto.text)
+  }
+
   @Get('pipe')
   async pipeExample() {
     return await this.captionsAiService.pipeExample();

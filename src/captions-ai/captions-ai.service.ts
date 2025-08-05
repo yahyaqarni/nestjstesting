@@ -10,11 +10,14 @@ import * as ffmpeg from 'fluent-ffmpeg';
 import { join } from 'path';
 import { SupabaseService } from 'src/supabase/supabase.service';
 import { SupabaseVectorStore } from '@langchain/community/vectorstores/supabase';
+import { Document } from '@langchain/core/documents';
+import { loadSummarizationChain } from 'langchain/chains';
 
 @Injectable()
 export class CaptionsAiService {
   private llm: OpenAI;
   private splitter: RecursiveCharacterTextSplitter;
+  private gpt: ChatOpenAI;
   constructor(
     private config: ConfigService,
     private supabase: SupabaseService,
@@ -30,6 +33,8 @@ export class CaptionsAiService {
       separators: ['\n\n', '\n', ' ', ''],
       chunkOverlap: 200, // Adjust overlap as needed
     });
+
+    this.gpt = new ChatOpenAI({ model: 'gpt-4o-mini' });
   }
 
   async convertToMp3(inputPath: string): Promise<string> {
@@ -103,25 +108,28 @@ export class CaptionsAiService {
     }
   }
 
+  async summary(transcriptAudio: string) {
+    const {transcript, docs, response} = await this.summaryChain.invoke(transcriptAudio);
+    const summary = await this.summarizeChain.invoke({input_documents: docs})
+    const formatted = JSON.parse(JSON.stringify(response.content as string))
+    return {transcript, summary, response: formatted};
+  }
+
   async splitText(audio: string) {
     try {
-      //console.log(typeof text);
-      const chunks = await this.ingestionChain.invoke(audio)
-      const embeddings = new OpenAIEmbeddings();
-
-      await SupabaseVectorStore.fromDocuments(chunks, embeddings, {
-        client: this.supabase,
-        tableName: 'documents',
+      const { message, transcript, docs } =
+        await this.ingestionChain.invoke(audio);
+      const summary = await this.summarizeChain.invoke({
+        input_documents: docs,
       });
 
-      return { chunks, message: 'embeddings stored successfully' };
+      return { message, transcript, summary };
     } catch (error) {
-      console.error('Error splitting text:', error);
+      throw new Error(error.message);
     }
   }
 
-
-   //-------------------------------------------------------------------------------
+  //-------------------------------------------------------------------------------
 
   private transcribeAudio = new RunnableLambda({
     func: async (audio: string) => {
@@ -133,17 +141,89 @@ export class CaptionsAiService {
       fs.unlinkSync(audio); // Delete the file after processing
       return transcript;
     },
-  })
-
- 
+  });
 
   private textSplit = new RunnableLambda({
-    func: async (trancript: string)=> {
-      return await this.splitter.createDocuments([trancript]);
-    }
-  })
+    func: async (transcript: string) => {
+      const chunks = await this.splitter.createDocuments([transcript]);
+      return { chunks, transcript };
+    },
+  });
 
-  private ingestionChain = this.transcribeAudio.pipe(this.textSplit);
+  private storeEmbeddings = new RunnableLambda({
+    func: async ({
+      chunks,
+      transcript,
+    }: {
+      chunks: Document[];
+      transcript: string;
+    }) => {
+      await SupabaseVectorStore.fromDocuments(
+        chunks as Document[],
+        new OpenAIEmbeddings(),
+        {
+          client: this.supabase,
+          tableName: 'documents',
+          
+        },
+      );
+
+      return {
+        message: 'success embeddings stored',
+        transcript: transcript,
+        docs: chunks,
+      };
+    },
+  });
+
+  private mapPrompt = `You are an assistant.
+
+Extract:
+- Key discussion points
+- Decisions made
+- Action items (with assignees if mentioned)
+make json for output.
+
+Transcript:
+{transcript}`;
 
 
+
+  private prompt = PromptTemplate.fromTemplate(this.mapPrompt);
+
+  private model = new ChatOpenAI({ model: 'gpt-4o-mini' });
+  private finalStep = new RunnableLambda({
+  func: async ({
+    transcript,
+    docs,
+  }: {
+    transcript: string;
+    docs: Document[];
+  }) => {
+    const prompt = await this.prompt.format({ transcript });
+    const response = await this.model.invoke(prompt);
+
+    return {
+      transcript,
+      docs,
+      response,
+    };
+  },
+});
+
+private summaryChain = this.textSplit
+  .pipe(this.storeEmbeddings)
+  .pipe(this.finalStep);
+
+
+  private summarizeChain = loadSummarizationChain(
+    new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0 }),
+    {
+      type: 'map_reduce',
+    },
+  );
+
+  private ingestionChain = this.transcribeAudio
+    .pipe(this.textSplit)
+    .pipe(this.storeEmbeddings);
 }
